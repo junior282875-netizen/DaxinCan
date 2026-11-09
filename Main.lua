@@ -8691,12 +8691,18 @@ do
     if type(Window) ~= "table" or type(note) ~= "function" or not LocalPlayer then
         error("[SummerEvent] Paste this section BELOW 'local Window = Library:CreateWindow(...)' and the 'note' function, e.g. right above '-- QUICK ACTION BAR'. Do not run it as its own script.")
     end
+    -- The whole feature code lives in its own function: Lua allows at most 200 local variables per
+    -- function, and your main script already uses a part of that budget. pcall = if anything fails at
+    -- load time, the rest of your script (menu, config) still starts and tells you what went wrong.
+    local slimeOk, slimeErr = pcall(function()
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local Workspace         = game:GetService("Workspace")
     local TeleportService   = game:GetService("TeleportService")
-    local VIM               = game:GetService("VirtualInputManager")
+    local VIM
+    pcall(function() VIM = game:GetService("VirtualInputManager") end) -- missing on some executors: only Click placing needs it
 
     local DEFAULT_UPGRADE_REMOTE = "upgrade_unit_ingame"     -- remote name inside client_to_server
+    local LOBBY_PLACE_ID = 8304191830                        -- the lobby place (rejoin / reconnect go here)
 
     local Remotes
     do
@@ -8725,7 +8731,7 @@ do
         local badSince
         while true do
             task.wait(2)
-            if opt("AutoRejoin", true) and (opt("AutoSummer", false) or opt("AutoCastle", false)) then
+            if opt("AutoRejoin", true) and (opt("AutoSummer", false) or opt("AutoCastle", false) or opt("AutoFarm", false)) then
                 local char = LocalPlayer.Character
                 local stuck = not game:IsLoaded() or not (char and char:FindFirstChild("HumanoidRootPart"))
                 if not stuck then
@@ -8740,7 +8746,7 @@ do
                     badSince = badSince or tick()
                     if tick() - badSince >= opt("RejoinAfter", 90) then
                         badSince = tick()
-                        local pid = tonumber(opt("RejoinPlaceId", "")) or game.PlaceId
+                        local pid = tonumber(opt("RejoinPlaceId", "")) or LOBBY_PLACE_ID
                         warn("[SummerEvent] stuck loading, rejoining place " .. tostring(pid))
                         pcall(function() TeleportService:Teleport(pid, LocalPlayer) end)
                     end
@@ -8995,32 +9001,53 @@ do
         },
         {
             name = "otherworld plane",
+            snap = true,
             sig = {"Folder", "Storm", "campfire", "flag", "Union", "Sparks"},
             ground = {{-17,68,123},{-15,68,128},{-6,68,132},{-7,68,139},{-16,68,116},{-9,68,115},{-6,68,110},{-27,68,114},{-22,68,112},{-24,68,106},{-19,68,111},{-14,68,139}},
             hill = {{1,75,125},{-2,75,120},{1,75,116},{8,75,120}},
         },
         {
             name = "sky aircraft",
+            snap = true,
             sig = {"Airship", "Arckz_Was_Here", "Barrel", "Big Crate", "Brick_Pile", "BrokenTv/mesh", "Capybara", "Casino_Doors", "Casino_Walls", "Electricity Thing", "Meshes/carpet1", "Old Sofa", "Paper Floor Texture", "Sand_Bags", "Support", "Support_2", "TrafficCone", "Trash Block", "Trash_Can", "Vending Machine", "Wooden Stack"},
             ground = {{1984,501,-1471},{1977,501,-1453},{1980,501,-1453},{1984,501,-1453},{1977,501,-1448},{1977,501,-1476},{1972,501,-1479},{1968,501,-1475},{1970,501,-1445}},
             hill = {{1987,505,-1455},{1987,505,-1458},{1991,505,-1460},{1991,505,-1454},{1988,505,-1450},{1988,505,-1445}},
         },
+        {
+            name = "adventurer town",
+            snap = true,
+            sig = {"Folder", "Union", "landscape", "path stuff"},
+            ground = {{-12,-8,-9},{-12,-8,-4},{-10,-8,-1},{-8,-8,-5},{-5,-8,-2},{-7,-8,2},{-4,-8,4},{-8,-8,-15},{-12,-8,-15},{2,-7,7},{1,-8,-2},{5,-8,-3},{16,-8,9},{18,-8,2},{16,-8,-1}},
+            hill = {{-16,3,-2},{-17,4,-11},{-18,4,-22},{-18,6,6},{-15,6,8},{-10,5,11},{-6,5,14}},
+        },
     }
 
     -- ── LOOP CONTROL ─────────────────────────────────────────────────────────
-    local running, runToken, currentMode = false, 0, "summer" -- mode: "summer" | "castle"
+    local running, runToken, currentMode = false, 0, "summer" -- mode: "summer" | "castle" | "farm"
+    local soldAll = false -- set when "sell at wave" fired: stop placing / upgrading
     local placed, usedPos = {}, {}
     local clickBusy = false -- true while a click-placement is running (anti-afk must not click then)
     local maxed, upgradeCount, unitSlot = {}, {}, {}
     local failStreak, failSince, upgLog = {}, {}, 0
 
     local function live(token) return running and token == runToken end
-    local function playing(token) return live(token) and not isFinished() end
+    local function playing(token) return live(token) and not isFinished() and not soldAll end
 
-    local stateLbl, castleLbl, mapLbl
+    local stateLbl, castleLbl, mapLbl, farmLbl
     local function setState(s)
         if stateLbl then stateLbl:Set("State: " .. s) end
         if castleLbl then castleLbl:Set("State: " .. s) end
+        if farmLbl then farmLbl:Set("State: " .. s) end
+    end
+
+    -- only one automation at a time: switch the other toggles off
+    local function exclusive(keepFlag)
+        for _, f in ipairs({"AutoSummer", "AutoCastle", "AutoFarm"}) do
+            if f ~= keepFlag then
+                local a = Window._flags[f]
+                if a and a:Get() then a:Set(false, true) end
+            end
+        end
     end
 
     -- ── MAP RECOGNITION ──────────────────────────────────────────────────────
@@ -9073,6 +9100,18 @@ do
         return nil
     end
 
+    -- Maps whose spots were typed in as whole numbers (snap = true): put every spot exactly on the
+    -- surface of workspace._terrain below it, like the spots that were recorded with the tool.
+    local function snapToSurface(p)
+        local terrain = Workspace:FindFirstChild("_terrain")
+        if not terrain then return p end
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Include
+        rp.FilterDescendantsInstances = {terrain}
+        local r = Workspace:Raycast(Vector3.new(p.X, p.Y + 2.5, p.Z), Vector3.new(0, -12, 0), rp)
+        return r and r.Position or p
+    end
+
     -- the recorded spots for a role: Farm / DPS use the ground list, Hill uses the hill list
     local function spotList(kind)
         local m = currentMap
@@ -9087,7 +9126,9 @@ do
         local list = {}
         for i = from, to do
             local t = raw[i]
-            list[#list + 1] = Vector3.new(t[1], t[2], t[3])
+            local pos = Vector3.new(t[1], t[2], t[3])
+            if m.snap then pos = snapToSurface(pos) end
+            list[#list + 1] = pos
         end
         if order == "Last to First" then
             local r = {}
@@ -9982,11 +10023,21 @@ do
         if sendOn == "Losses Only" and won then return end
 
         local mode = "Summer Event"
-        if currentMode == "castle" then
+        if currentMode == "farm" then
+            mode = "Auto Farm: " .. tostring(opt("FarmLevel", "?"))
+        elseif currentMode == "castle" then
             mode = castleHard and ("Infinity Castle (Hard, floors %d-%d)"):format(hardFloor, hardFloor + 1) or "Infinity Castle"
         end
         task.spawn(function() sendWebhook(res, gained, dur, mode, currentMap and currentMap.name or nil, false) end)
         task.wait(1) -- give the request a head start before we teleport away
+    end
+
+    -- a run that was ended by "Leave At Wave" (no results screen): still counts as a run
+    local function countRunLeft()
+        if os.time() - session.last > opt("SessionIdleMin", 30) * 60 then resetSession() end
+        session.runs = session.runs + 1
+        session.last = os.time()
+        saveSession()
     end
 
     -- ── PHASES ───────────────────────────────────────────────────────────────
@@ -10000,6 +10051,58 @@ do
                 task.wait(0.5)
                 if not live(token) or not inMatch() then return end
             end
+        end
+    end
+
+    -- ── per-match helpers: sell at wave, leave at wave, delete map ───────────
+    local function sellAllUnits()
+        local r = getRemote("sell_unit_ingame")
+        if not r then return end
+        for u in pairs((mySet())) do
+            pcall(function() r:InvokeServer(u) end)
+        end
+    end
+
+    local function deleteMapStuff()
+        local classes = {Model = true, MeshPart = true, Part = true, Folder = true, UnionOperation = true}
+        local function wipe(folder)
+            if not folder then return end
+            for _, c in ipairs(folder:GetChildren()) do
+                if classes[c.ClassName] then pcall(function() c:Destroy() end) end
+            end
+        end
+        local terrain = Workspace:FindFirstChild("_terrain")
+        if opt("DeleteMap", false) then
+            wipe(Workspace:FindFirstChild("_map"))
+            wipe(terrain and terrain:FindFirstChild("terrain"))
+        end
+        if opt("DeleteHill", false) then
+            wipe(terrain and terrain:FindFirstChild("hill"))
+        end
+    end
+
+    local function waveWatcher(token)
+        local sold, left = false, false
+        while live(token) and not isFinished() do
+            local wv = Workspace:FindFirstChild("_wave_num")
+            local wave = wv and tonumber(wv.Value) or 0
+            if opt("SellAtWaveOn", false) and not sold and wave >= opt("SellAtWave", 25) then
+                sold = true
+                soldAll = true -- stop placing / upgrading
+                setState("Selling all units (wave " .. wave .. ")")
+                sellAllUnits()
+                task.wait(2)
+                sellAllUnits()
+            end
+            if opt("LeaveAtWaveOn", false) and not left and wave >= opt("LeaveAtWave", 50) then
+                left = true
+                reportThis = false
+                countRunLeft()
+                setState("Leaving at wave " .. wave)
+                returnToLobby(token)
+                return
+            end
+            task.wait(1)
         end
     end
 
@@ -10037,12 +10140,52 @@ do
         returnToLobby(token)
     end
 
+    -- Auto Farm: after a match (vote replay / next story, or leave)
+    local function farmFinish(token)
+        setState("Match finished")
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        local t0 = tick()
+        while live(token) and tick() - t0 < 10 do
+            local ru = pg and pg:FindFirstChild("ResultsUI")
+            if ru and ru.Enabled then break end
+            task.wait(0.5)
+        end
+        task.wait(opt("ReturnDelay", 2))
+
+        local after = opt("FarmAfter", "Replay")
+        if after ~= "Leave To Lobby" then
+            local vote = (after == "Next Story") and "next_story" or "replay"
+            local r = getRemote("set_game_finished_vote")
+            if r then
+                for attempt = 1, 3 do
+                    if not live(token) then return end
+                    setState(("Voting %s (try %d)"):format(vote, attempt))
+                    pcall(function() r:InvokeServer(vote) end)
+                    task.wait(0.3)
+                    pcall(function() r:InvokeServer(vote) end) -- the original script votes twice
+                    local t1 = tick()
+                    while live(token) and tick() - t1 < 8 do
+                        task.wait(0.5)
+                        if not inMatch() or not isFinished() then
+                            local t2 = tick()
+                            while live(token) and inMatch() and isStarted() and tick() - t2 < 20 do task.wait(0.5) end
+                            return
+                        end
+                    end
+                end
+            end
+        end
+        returnToLobby(token)
+    end
+
     local function finishMatch(token)
         if reportThis then
             reportThis = false
             pcall(reportMatch, token)
         end
-        if currentMode == "castle" then castleFinish(token) else returnToLobby(token) end
+        if currentMode == "castle" then castleFinish(token)
+        elseif currentMode == "farm" then farmFinish(token)
+        else returnToLobby(token) end
     end
 
     local function matchPhase(token)
@@ -10050,6 +10193,7 @@ do
         maxed, upgradeCount, unitSlot = {}, {}, {}
         failStreak, failSince, upgLog = {}, {}, 0
         zoomApplied = false
+        soldAll = false
         local tIn = tick()
         -- a fresh match: remember the inventory now, to find out what we got at the end
         reportThis = not isFinished()
@@ -10058,6 +10202,7 @@ do
 
         setState("In match - recognising the map")
         resolveMap(token)
+        task.spawn(function() task.wait(2); pcall(deleteMapStuff) end) -- after the map was recognised
 
         setState("In match - waiting for start")
         local voted = false
@@ -10074,6 +10219,8 @@ do
         end
         if not live(token) then return end
         matchStartTick = tick()
+        task.spawn(waveWatcher, token)
+        task.spawn(function() task.wait(5); pcall(deleteMapStuff) end)
 
         if not isFinished() then
             placeAll(token)
@@ -10083,7 +10230,7 @@ do
             end
             finalPhase(token)
             if playing(token) then setState("In match - waiting for finish") end
-            while playing(token) do task.wait(0.5) end
+            while live(token) and not isFinished() do task.wait(0.5) end
         end
         if live(token) then finishMatch(token) end
     end
@@ -10187,8 +10334,221 @@ do
         end
     end
 
+    -- ══════════════════════════════════════════════════════════════════════
+    --  AUTO FARM: story / legend / raid / portals / dungeon + daily challenge
+    -- ══════════════════════════════════════════════════════════════════════
+    local WORLDS = {}
+    do
+        local function seq(prefix, from, to, mid)
+            local t = {}
+            for i = from, to do t[#t + 1] = prefix .. (mid or "_level_") .. i end
+            return t
+        end
+        local function story(prefix)
+            local t = {prefix .. "_infinite"}
+            for i = 1, 6 do t[#t + 1] = prefix .. "_level_" .. i end
+            return t
+        end
+        WORLDS["Story Worlds"] = {
+            {"Planet Namak", story("namek")}, {"Shiganshinu District", story("aot")}, {"Snowy Town", story("demonslayer")},
+            {"Hidden Sand Village", story("naruto")}, {"Marine's Ford", story("marineford")}, {"Ghoul City", story("tokyoghoul")},
+            {"Hollow World", story("hueco")}, {"Ant Kingdom", story("hxhant")}, {"Magic Town", story("magnolia")},
+            {"Cursed Academy", story("jjk")}, {"Clover Kingdom", story("clover")}, {"Cape Canaveral", story("jojo")},
+            {"Alien Spaceship", story("opm")}, {"Fabled Kingdom", story("7ds")}, {"Hero City", story("mha")},
+        }
+        WORLDS["Legend Stages"] = {
+            {"Clover Kingdom (Elf Invasion)", seq("clover_legend_", 1, 3, "")}, {"Hollow Invasion", seq("bleach_legend_", 1, 6, "")},
+            {"Cape Canaveral (Legend)", seq("jojo_legend_", 1, 3, "")}, {"Fabled Kingdom (Legend)", seq("7ds_legend_", 1, 3, "")},
+            {"Hero City (Midnight)", seq("mha_legend_", 1, 6, "")},
+        }
+        WORLDS["Raid Worlds"] = {
+            {"Storm Hideout", seq("uchiha", 1, 5)}, {"West City", {"west_city_raid"}}, {"Infinity Train", {"demonslayer_raid_1"}},
+            {"Shiganshinu District - Raid", {"aot_raid_1"}}, {"Hidden Sand Village - Raid", {"naruto_raid_1"}},
+            {"Freezo's Invasion", seq("west_city_frieza", 1, 5)}, {"Entertainment District", seq("entertainment_district", 1, 5)},
+        }
+        WORLDS["Portals"] = {
+            {"Alien Portals", {"portal_boros_g"}}, {"Zeldris Portals", {"portal_zeldris"}}, {"Demon Portals", {"april_portal_item"}},
+        }
+        WORLDS["Dungeon"] = {
+            {"Cursed Womb", {"jjk_finger"}}, {"Cursed Parade", {"jjk_raid"}},
+        }
+    end
+    local CATEGORIES = {"Story Worlds", "Legend Stages", "Raid Worlds", "Portals", "Dungeon"}
+
+    local function worldNames(cat)
+        local out = {}
+        for _, w in ipairs(WORLDS[cat] or {}) do out[#out + 1] = w[1] end
+        return out
+    end
+    local function levelNames(cat, world)
+        for _, w in ipairs(WORLDS[cat] or {}) do
+            if w[1] == world then return w[2] end
+        end
+        return {}
+    end
+    local function diffNames(cat, level)
+        level = tostring(level or "")
+        if cat == "Portals" or cat == "Dungeon" then return {"Default"} end
+        if cat == "Legend Stages" or cat == "Raid Worlds" or level:find("_infinite", 1, true) then return {"Hard"} end
+        return {"Normal", "Hard"}
+    end
+
+    local function waitForMatch(token, secs)
+        local t0 = tick()
+        while live(token) and tick() - t0 < secs do
+            task.wait(0.5)
+            if inMatch() then return true end
+        end
+        return inMatch()
+    end
+
+    -- a lobby (story / raid) with nobody inside: join, lock the level, start, stand in the door
+    local function startLobbyGame(folder, level, friends, difficulty, key)
+        if not folder then return false end
+        local lobby
+        for _, v in ipairs(folder:GetDescendants()) do
+            if v.Name == "Owner" and v.Value == nil then lobby = v.Parent; break end
+        end
+        if not lobby then return false end
+        local name = tostring(lobby.Name)
+        local join, lock, start = getRemote("request_join_lobby"), getRemote("request_lock_level"), getRemote("request_start_game")
+        if not (join and lock and start) then return false end
+        pcall(function()
+            if key then join:InvokeServer(name, {selected_key = key}) else join:InvokeServer(name) end
+        end)
+        task.wait(0.3)
+        pcall(function() lock:InvokeServer(name, level, friends, difficulty) end)
+        pcall(function() start:InvokeServer(name) end)
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local door = lobby:FindFirstChild("Door")
+        if hrp and door and door:IsA("BasePart") then hrp.CFrame = door.CFrame end
+        return true
+    end
+
+    -- portals: take the first matching portal item from the inventory, open it, start the lobby it created
+    local function startPortal(itemId, friends)
+        local uuid
+        pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local svc = Loader.load_client_service(script, "ItemInventoryServiceClient")
+            for _, it in pairs(svc.session.inventory.inventory_profile_data.unique_items) do
+                if tostring(it.item_id):find(itemId, 1, true) then uuid = it.uuid; break end
+            end
+        end)
+        if not uuid then
+            note("Auto Farm", "No '" .. itemId .. "' portal in your inventory.", "Warning")
+            return false
+        end
+        local use = getRemote("use_portal")
+        if not use then return false end
+        pcall(function() use:InvokeServer(uuid, {friends_only = friends}) end)
+        task.wait(1.5)
+        local start = getRemote("request_start_game")
+        pcall(function()
+            for _, v in ipairs(Workspace._PORTALS.Lobbies:GetDescendants()) do
+                if v.Name == "Owner" and tostring(v.Value) == LocalPlayer.Name then
+                    if start then start:InvokeServer(tostring(v.Parent.Name)) end
+                    break
+                end
+            end
+        end)
+        return true
+    end
+
+    -- dungeons: fixed lobby + key
+    local DUNGEONS = {
+        jjk_finger = {lobby = "_lobbytemplate_event222", key = "key_jjk_finger"},
+        jjk_raid   = {lobby = "_lobbytemplate_event23",  key = "key_jjk_map"},
+    }
+    local function startDungeon(level, friends)
+        local d = DUNGEONS[level]
+        if not d then return false end
+        local join, lock, start = getRemote("request_join_lobby"), getRemote("request_lock_level"), getRemote("request_start_game")
+        if not (join and lock and start) then return false end
+        pcall(function() join:InvokeServer(d.lobby, {selected_key = d.key}) end)
+        task.wait(0.3)
+        pcall(function() lock:InvokeServer(d.lobby, level, friends, "Default") end)
+        pcall(function() start:InvokeServer(d.lobby) end)
+        pcall(function()
+            local lobby = Workspace._DUNGEONS.Lobbies[d.lobby]
+            local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and lobby.Door then hrp.CFrame = lobby.Door.CFrame end
+        end)
+        return true
+    end
+
+    -- daily challenge
+    local function challengeCleared()
+        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not pg then return nil end
+        for _, v in ipairs(pg:GetChildren()) do
+            if v:IsA("SurfaceGui") and v:FindFirstChild("ChallengeCleared") then
+                return v.ChallengeCleared.Visible
+            end
+        end
+        return nil
+    end
+    local function challengeWanted()
+        if challengeCleared() ~= false then return false end -- cleared (or not loaded yet)
+        if opt("AutoChallengeAny", false) then return true end
+        local ok, reward = pcall(function() return Workspace._LOBBIES._DATA._CHALLENGE.current_reward.Value end)
+        return ok and reward == opt("ChallengeReward", "star_fruit_random")
+    end
+    local function joinChallenge()
+        local join = getRemote("request_join_lobby")
+        if not join then return end
+        pcall(function()
+            for _, v in ipairs(Workspace._CHALLENGES.Challenges:GetDescendants()) do
+                if v.Name == "Owner" and v.Value == nil then
+                    join:InvokeServer(tostring(v.Parent.Name))
+                    break
+                end
+            end
+        end)
+    end
+
+    local function farmLobbyPhase(token)
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local cpos = hrp and hrp.CFrame
+
+        if opt("AutoChallenge", false) and challengeWanted() then
+            setState("In lobby - joining the daily challenge")
+            joinChallenge()
+            waitForMatch(token, 20)
+            if cpos and hrp and hrp.Parent and not inMatch() then hrp.CFrame = cpos end
+            return
+        end
+
+        local cat     = opt("FarmCategory", "Story Worlds")
+        local level   = opt("FarmLevel", "namek_infinite")
+        local diff    = opt("FarmDifficulty", "Hard")
+        local friends = opt("FarmFriends", false)
+        setState(("In lobby - starting %s (%s)"):format(tostring(level), tostring(cat)))
+
+        local ok = false
+        if cat == "Story Worlds" or cat == "Legend Stages" then
+            local l = Workspace:FindFirstChild("_LOBBIES")
+            ok = startLobbyGame(l and l:FindFirstChild("Story"), level, friends, diff)
+        elseif cat == "Raid Worlds" then
+            local r = Workspace:FindFirstChild("_RAID")
+            ok = startLobbyGame(r and r:FindFirstChild("Raid"), level, friends, diff)
+        elseif cat == "Portals" then
+            ok = startPortal(level, friends)
+        elseif cat == "Dungeon" then
+            ok = startDungeon(level, friends)
+        end
+        if not ok then
+            setState("In lobby - no free lobby / portal, retrying")
+            task.wait(3)
+            return
+        end
+        waitForMatch(token, opt("FarmRetry", 20))
+        if cpos and hrp and hrp.Parent and not inMatch() then hrp.CFrame = cpos end
+    end
+
     local function lobbyPhase(token)
         if currentMode == "castle" then return castleLobbyPhase(token) end
+        if currentMode == "farm" then return farmLobbyPhase(token) end
         local event = tostring(opt("SummerEventName", "summer2_event"))
         setState("In lobby - joining " .. event)
         local r = getRemote("request_matchmaking")
@@ -10230,7 +10590,8 @@ do
     end
 
     -- ── ANTI AFK: a click at a random place through VirtualUser ──────────────
-    local VirtualUser = game:GetService("VirtualUser")
+    local VirtualUser
+    pcall(function() VirtualUser = game:GetService("VirtualUser") end)
     local function afkClick()
         local cam = Workspace.CurrentCamera
         if not cam then return end
@@ -10239,6 +10600,7 @@ do
             math.random(math.floor(vp.X * 0.1), math.floor(vp.X * 0.9)),
             math.random(math.floor(vp.Y * 0.2), math.floor(vp.Y * 0.8)))
         pcall(function()
+            if not VirtualUser then return end
             VirtualUser:CaptureController()
             VirtualUser:Button1Down(pos, cam.CFrame)
             task.wait(0.05)
@@ -10246,8 +10608,10 @@ do
         end)
     end
 
-    LocalPlayer.Idled:Connect(function()
-        if opt("AntiAFK", true) then afkClick() end
+    pcall(function()
+        LocalPlayer.Idled:Connect(function()
+            if opt("AntiAFK", true) then afkClick() end
+        end)
     end)
 
     task.spawn(function()
@@ -10291,9 +10655,196 @@ do
         end
     end)
 
+    -- ══════════════════════════════════════════════════════════════════════
+    --  EXTRAS: background features (each one only runs while its toggle is on)
+    -- ══════════════════════════════════════════════════════════════════════
+
+    -- mute the error sounds / messages
+    task.spawn(function()
+        while true do
+            if opt("MuteErrors", true) then
+                pcall(function()
+                    local sfx = ReplicatedStorage.packages.assets["ui_sfx"]
+                    sfx.error.Volume = 0
+                    sfx.error_old.Volume = 0
+                end)
+                pcall(function() LocalPlayer.PlayerGui.MessageGui.Enabled = false end)
+            end
+            task.wait(5)
+        end
+    end)
+
+    -- hide the name tag above my head
+    task.spawn(function()
+        while true do
+            task.wait(0.5)
+            if opt("HideName", false) then
+                pcall(function()
+                    local head = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Head")
+                    local o = head and head:FindFirstChild("_overhead")
+                    if o then o:Destroy() end
+                end)
+            end
+        end
+    end)
+
+    -- place anywhere: keeps the client's placement flag on (the server still decides)
+    local placementService
+    task.spawn(function()
+        while true do
+            if opt("PlaceAnywhere", false) then
+                pcall(function()
+                    if not placementService then
+                        local Loader = require(ReplicatedStorage.src.Loader)
+                        placementService = Loader.load_client_service(script, "PlacementServiceClient")
+                    end
+                    placementService.can_place = true
+                end)
+                task.wait()
+            else
+                task.wait(0.5)
+            end
+        end
+    end)
+
+    -- auto reconnect: when the "disconnected" prompt shows up, go back to the lobby
+    pcall(function()
+        local overlay = game:GetService("CoreGui").RobloxPromptGui.promptOverlay
+        overlay.ChildAdded:Connect(function(a)
+            if a.Name == "ErrorPrompt" and opt("AutoReconnect", true) then
+                warn("[SummerEvent] disconnected - reconnecting in 10s")
+                task.wait(10)
+                local pid = tonumber(opt("RejoinPlaceId", "")) or LOBBY_PLACE_ID
+                pcall(function() TeleportService:Teleport(pid, LocalPlayer) end)
+            end
+        end)
+    end)
+
+    -- auto load on teleport: queue the loader for the next place
+    local function queueLoader()
+        if not opt("AutoLoadOnTeleport", false) then return end
+        local src = tostring(opt("LoaderSource", "") or "")
+        if src == "" then
+            note("Auto Load", "Enter your script URL or file name first.", "Warning")
+            return
+        end
+        local code
+        if src:match("^https?://") then
+            code = ("loadstring(game:HttpGet(%q))()"):format(src)
+        else
+            code = ("loadstring(readfile(%q))()"):format(src)
+        end
+        local q = queue_on_teleport or (syn and syn.queue_on_teleport)
+        if q then pcall(q, code) else note("Auto Load", "Your executor has no queue_on_teleport.", "Warning") end
+    end
+
+    -- daily extras
+    local CODES = {"TWOMILLION", "subtomaokuma", "CHALLENGEFIX", "GINYUFIX", "RELEASE", "SubToKelvingts", "SubToBlamspot",
+        "KingLuffy", "TOADBOIGAMING", "noclypso", "FictioNTheFirst", "GOLDENSHUTDOWN", "GOLDEN", "SINS2", "subtosnowrbx",
+        "Cxrsed", "VIGILANTE", "HAPPYEASTER", "ENTERTAINMENT"}
+    local function redeemCodes()
+        local r = getRemote("redeem_code")
+        if not r then return note("Codes", "Redeem remote not found.", "Warning") end
+        task.spawn(function()
+            for _, c in ipairs(CODES) do
+                pcall(function() r:InvokeServer(c) end)
+                task.wait(0.3)
+            end
+            note("Codes", "Tried " .. #CODES .. " codes.", "Success")
+        end)
+    end
+    local function claimDaily()
+        local r = getRemote("claim_daily_reward")
+        if r then pcall(function() r:InvokeServer() end) end
+    end
+    task.spawn(function()
+        task.wait(8)
+        if opt("AutoClaimDaily", true) then claimDaily() end
+    end)
+    task.spawn(function()
+        while true do
+            task.wait(60)
+            if opt("AutoDailyQuest", false) then
+                local r = getRemote("accept_npc_quest")
+                if r then pcall(function() r:InvokeServer(tostring(opt("DailyQuestId", "mha_daily"))) end) end
+            end
+        end
+    end)
+    task.spawn(function()
+        local eggs = {"easter_egg_1", "easter_egg_2", "easter_egg_3", "easter_egg_4", "easter_egg_5", "easter_egg_6"}
+        while true do
+            task.wait(1)
+            local area = Workspace:FindFirstChild("EasterArea")
+            if area and area:FindFirstChild("leaderboard") then
+                if opt("AutoFeedEgg", false) then
+                    local r = getRemote("feed_easter_meter")
+                    if r then for _, e in ipairs(eggs) do pcall(function() r:InvokeServer(e) end) end end
+                end
+                if opt("AutoClaimEgg", false) then
+                    local r = getRemote("claim_easter_meter")
+                    if r then for _, e in ipairs(eggs) do pcall(function() r:InvokeServer(e) end) end end
+                end
+            end
+        end
+    end)
+
+    -- auto summon
+    local BANNERS = {Special = "EventClover", Standard = "Standard"}
+    task.spawn(function()
+        while true do
+            task.wait(opt("SummonDelay", 1.5))
+            if opt("AutoSummon", false) then
+                pcall(function()
+                    local r = getRemote("buy_from_banner")
+                    if r then
+                        r:InvokeServer(BANNERS[opt("SummonBanner", "Standard")] or "Standard", tostring(opt("SummonMethod", "ticket")))
+                    end
+                end)
+            end
+        end
+    end)
+
+    -- merchant sniper
+    local FRUITS = {
+        ["Any StarFruits"] = {"StarFruitGreen", "StarFruitRed", "StarFruitPink", "StarFruitBlue", "StarFruitEpic"},
+        ["StarFruit"] = {"StarFruit"}, ["StarFruitGreen"] = {"StarFruitGreen"}, ["StarFruitRed"] = {"StarFruitRed"},
+        ["StarFruitPink"] = {"StarFruitPink"}, ["StarFruitBlue"] = {"StarFruitBlue"}, ["StarFruitsRainbow"] = {"StarFruitEpic"},
+    }
+    local MERCHANT_ITEMS = {
+        ["Any Items"] = {"LuckPotion", "star_remnant", "summon_ticket"}, ["LuckPotion"] = {"LuckPotion"},
+        ["star_remnant"] = {"star_remnant"}, ["summon_ticket"] = {"summon_ticket"},
+    }
+    task.spawn(function()
+        while true do
+            task.wait(3)
+            if opt("AutoSnipeMerchant", false) then
+                pcall(function()
+                    local m = Workspace:FindFirstChild("travelling_merchant")
+                    local open = m and m:FindFirstChild("is_open")
+                    local stand = m and m:FindFirstChild("stand")
+                    local items = stand and stand:FindFirstChild("items")
+                    local buy = getRemote("buy_travelling_merchant_item")
+                    if not (open and open.Value == true and items and buy) then return end
+                    local want = {}
+                    for _, p in ipairs(FRUITS[opt("SnipeFruit", "None")] or {}) do want[#want + 1] = p end
+                    for _, p in ipairs(MERCHANT_ITEMS[opt("SnipeItem", "None")] or {}) do want[#want + 1] = p end
+                    for _, it in ipairs(items:GetChildren()) do
+                        for _, p in ipairs(want) do
+                            if it.Name:find(p, 1, true) then
+                                pcall(function() buy:InvokeServer(it.Name) end)
+                                break
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    end)
+
     -- ══════════════════════════════════════════════════════════════════════════
     --  UI
     -- ══════════════════════════════════════════════════════════════════════════
+    do -- Summer Event UI (own scope: Lua allows at most 200 local variables per function)
     local SumTab = Window:CreateTab({Name = "Summer Event", Icon = "beach_access"})
 
     -- ·· Main ····················································································
@@ -10302,8 +10853,7 @@ do
     gMain:CreateToggle({Name = "Auto Summer Event", Default = false, Flag = "AutoSummer",
         Callback = function(v)
             if v then
-                local c = Window._flags["AutoCastle"]
-                if c and c:Get() then c:Set(false, true) end -- only one feature at a time
+                exclusive("AutoSummer")
                 startLoop("summer")
             elseif currentMode == "summer" then
                 stopLoop()
@@ -10430,10 +10980,128 @@ do
     gTry:CreateSlider({Name = "Tries Per Spot", Min = 1, Max = 10, Default = 2, Flag = "RetriesPerSpot"})
     gTry:CreateSlider({Name = "Delay Between Tries", Min = 0.1, Max = 3, Increment = 0.1, Default = 0.4, Suffix = "s", Flag = "PlaceDelay"})
     gTry:CreateSlider({Name = "Give Up On A Unit After", Min = 30, Max = 600, Increment = 10, Default = 180, Suffix = "s", Flag = "PlaceTimeout"})
+    end
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    --  AUTO FARM TAB
+    -- ══════════════════════════════════════════════════════════════════════════
+    do -- Auto Farm UI (own scope: Lua allows at most 200 local variables per function)
+    local FarmTab = Window:CreateTab({Name = "Auto Farm", Icon = "sports_esports"})
+    local FM = FarmTab:CreateSubTab({Name = "Farm"})
+
+    local gFarm = FM:CreateGroup({Name = "Auto Farm", Icon = "play_arrow"})
+    gFarm:CreateToggle({Name = "Auto Farm", Default = false, Flag = "AutoFarm",
+        Callback = function(v)
+            if v then
+                exclusive("AutoFarm")
+                startLoop("farm")
+            elseif currentMode == "farm" then
+                stopLoop()
+            end
+        end})
+    farmLbl = gFarm:CreateLabel({Text = "State: Idle"})
+    gFarm:CreateLabel({Text = "Units, upgrades and placement use the settings of the Summer Event tab. The map is recognised automatically."})
+
+    local gWorld = FM:CreateGroup({Name = "World", Icon = "public"})
+    local ddCat, ddWorld, ddLevel, ddDiff
+    local function refreshDiff() ddDiff:SetOptions(diffNames(ddCat:Get(), ddLevel:Get())) end
+    local function refreshLevels() ddLevel:SetOptions(levelNames(ddCat:Get(), ddWorld:Get())); refreshDiff() end
+    local function refreshWorlds() ddWorld:SetOptions(worldNames(ddCat:Get())); refreshLevels() end
+    local w0 = worldNames("Story Worlds")[1]
+    local l0 = levelNames("Story Worlds", w0)[1]
+    ddCat   = gWorld:CreateDropdown({Name = "Category", Options = CATEGORIES, Default = "Story Worlds", Flag = "FarmCategory", Callback = refreshWorlds})
+    ddWorld = gWorld:CreateDropdown({Name = "World", Options = worldNames("Story Worlds"), Default = w0, Flag = "FarmWorld", Callback = refreshLevels})
+    ddLevel = gWorld:CreateDropdown({Name = "Level", Options = levelNames("Story Worlds", w0), Default = l0, Flag = "FarmLevel", Callback = refreshDiff})
+    ddDiff  = gWorld:CreateDropdown({Name = "Difficulty", Options = diffNames("Story Worlds", l0), Default = diffNames("Story Worlds", l0)[1], Flag = "FarmDifficulty"})
+    gWorld:CreateToggle({Name = "Friends Only", Default = false, Flag = "FarmFriends", HideFromActive = true})
+    gWorld:CreateSlider({Name = "Wait For Teleport", Min = 8, Max = 60, Default = 20, Suffix = "s", Flag = "FarmRetry"})
+
+    local gAfter = FM:CreateGroup({Name = "After A Match / During A Match", Icon = "loop"})
+    gAfter:CreateDropdown({Name = "After A Match", Options = {"Replay", "Next Story", "Leave To Lobby"}, Default = "Replay", Flag = "FarmAfter"})
+    gAfter:CreateToggle({Name = "Leave At Wave", Default = false, Flag = "LeaveAtWaveOn", HideFromActive = true})
+    gAfter:CreateSlider({Name = "Leave At Wave Number", Min = 1, Max = 200, Default = 50, Flag = "LeaveAtWave"})
+    gAfter:CreateToggle({Name = "Sell All Units At Wave", Default = false, Flag = "SellAtWaveOn", HideFromActive = true})
+    gAfter:CreateSlider({Name = "Sell At Wave Number", Min = 1, Max = 200, Default = 25, Flag = "SellAtWave"})
+    gAfter:CreateLabel({Text = "Leave / Sell At Wave work in every mode (Summer Event, Castle, Auto Farm)."})
+
+    local gChal = FM:CreateGroup({Name = "Daily Challenge", Icon = "emoji_events"})
+    gChal:CreateToggle({Name = "Auto Challenge", Default = false, Flag = "AutoChallenge", HideFromActive = true})
+    gChal:CreateDropdown({Name = "Wanted Reward", Options = {"star_fruit_random", "star_remnant", "gems", "gold"}, Default = "star_fruit_random", Flag = "ChallengeReward"})
+    gChal:CreateToggle({Name = "Farm Any Reward", Default = false, Flag = "AutoChallengeAny", HideFromActive = true})
+
+    local TM = FarmTab:CreateSubTab({Name = "Team"})
+    local gTeam = TM:CreateGroup({Name = "Team", Icon = "groups"})
+    local teamLbl = gTeam:CreateLabel({Text = "Equipped: (press Read Team)"})
+    local function readTeam()
+        local eq = readEquipped()
+        local parts = {}
+        for slot = 1, 6 do
+            if eq[slot] then parts[#parts + 1] = slot .. ": " .. eq[slot].id end
+        end
+        teamLbl:Set(#parts > 0 and ("Equipped - " .. table.concat(parts, " | ")) or "Could not read the equipped team")
+        autoFillIds(true) -- saves the uuids into the Unit ID boxes
+    end
+    gTeam:CreateButton({Name = "Read + Save Equipped Team", Icon = "search", Callback = readTeam})
+    gTeam:CreateDropdown({Name = "Team Preset", Options = {"TEAM 1", "TEAM 2", "TEAM 3", "TEAM 4", "TEAM 5"}, Default = "TEAM 1", Flag = "TeamPreset"})
+    gTeam:CreateButton({Name = "Switch To Preset", Icon = "swap_horiz", Callback = function()
+        local r = getRemote("switch_team_loadout")
+        if not r then return note("Team", "Team remote not found.", "Warning") end
+        local n = tostring(opt("TeamPreset", "TEAM 1")):match("%d")
+        pcall(function() r:InvokeServer(n) end)
+        task.delay(2, readTeam)
+        note("Team", "Switched to team " .. tostring(n), "Success")
+    end})
+    end
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    --  EXTRAS TAB
+    -- ══════════════════════════════════════════════════════════════════════════
+    do -- Extras UI (own scope: Lua allows at most 200 local variables per function)
+    local ExTab = Window:CreateTab({Name = "Extras", Icon = "build"})
+
+    local DL = ExTab:CreateSubTab({Name = "Daily"})
+    local gDaily = DL:CreateGroup({Name = "Daily Extras", Icon = "today"})
+    gDaily:CreateButton({Name = "Redeem All Codes", Icon = "redeem", Callback = redeemCodes})
+    gDaily:CreateButton({Name = "Claim Daily Reward Now", Icon = "card_giftcard", Callback = function() claimDaily(); note("Daily", "Requested.", "Info") end})
+    gDaily:CreateToggle({Name = "Claim Daily Reward On Start", Default = true, Flag = "AutoClaimDaily", HideFromActive = true})
+    gDaily:CreateToggle({Name = "Auto Daily Quest", Default = false, Flag = "AutoDailyQuest", HideFromActive = true})
+    gDaily:CreateInput({Name = "Daily Quest Id (Enter)", Default = "mha_daily", Flag = "DailyQuestId"})
+    gDaily:CreateToggle({Name = "Auto Feed Easter Eggs", Default = false, Flag = "AutoFeedEgg", HideFromActive = true})
+    gDaily:CreateToggle({Name = "Auto Claim Easter Eggs", Default = false, Flag = "AutoClaimEgg", HideFromActive = true})
+
+    local SH = ExTab:CreateSubTab({Name = "Shop"})
+    local gSum = SH:CreateGroup({Name = "Auto Summon", Icon = "casino"})
+    gSum:CreateDropdown({Name = "Banner", Options = {"Special", "Standard"}, Default = "Standard", Flag = "SummonBanner"})
+    gSum:CreateDropdown({Name = "Method", Options = {"ticket", "gems", "gems10"}, Default = "ticket", Flag = "SummonMethod"})
+    gSum:CreateSlider({Name = "Delay Between Summons", Min = 0.5, Max = 10, Increment = 0.5, Default = 1.5, Suffix = "s", Flag = "SummonDelay"})
+    gSum:CreateToggle({Name = "Auto Summon", Default = false, Flag = "AutoSummon"})
+    local gMer = SH:CreateGroup({Name = "Merchant Sniper", Icon = "storefront"})
+    gMer:CreateDropdown({Name = "Star Fruit", Options = {"None", "Any StarFruits", "StarFruit", "StarFruitGreen", "StarFruitRed", "StarFruitPink", "StarFruitBlue", "StarFruitsRainbow"}, Default = "None", Flag = "SnipeFruit"})
+    gMer:CreateDropdown({Name = "Items", Options = {"None", "Any Items", "LuckPotion", "star_remnant", "summon_ticket"}, Default = "None", Flag = "SnipeItem"})
+    gMer:CreateToggle({Name = "Auto Snipe Merchant", Default = false, Flag = "AutoSnipeMerchant"})
+
+    local MS = ExTab:CreateSubTab({Name = "Misc"})
+    local gPerf = MS:CreateGroup({Name = "Performance / Placement", Icon = "speed"})
+    gPerf:CreateLabel({Text = "Delete Map and Delete Hill remove the decorations on the client (hills included, so Hill spots stop being visible: use the Remote placing method with them)."})
+    gPerf:CreateToggle({Name = "Delete Map (FPS)", Default = false, Flag = "DeleteMap"})
+    gPerf:CreateToggle({Name = "Delete Hills", Default = false, Flag = "DeleteHill"})
+    gPerf:CreateToggle({Name = "Place Anywhere", Default = false, Flag = "PlaceAnywhere"})
+    local gPlr = MS:CreateGroup({Name = "Player", Icon = "person"})
+    gPlr:CreateToggle({Name = "Hide My Name Tag", Default = false, Flag = "HideName"})
+    gPlr:CreateToggle({Name = "Mute Error Sounds And Messages", Default = true, Flag = "MuteErrors", HideFromActive = true})
+    local gConn = MS:CreateGroup({Name = "Connection", Icon = "wifi"})
+    gConn:CreateToggle({Name = "Auto Reconnect After A Kick", Default = true, Flag = "AutoReconnect", HideFromActive = true})
+    gConn:CreateToggle({Name = "Auto Load On Teleport", Default = false, Flag = "AutoLoadOnTeleport", HideFromActive = true,
+        Callback = function(v) if v then queueLoader() end end})
+    gConn:CreateInput({Name = "Script URL Or File Name (Enter)", Placeholder = "https://... or myscript.lua", Flag = "LoaderSource",
+        Callback = function() queueLoader() end})
+    gConn:CreateLabel({Text = "Only needed if you do NOT use your executor's autoexec folder (using both loads the script twice)."})
+    end
 
     -- ══════════════════════════════════════════════════════════════════════════
     --  WEBHOOK TAB
     -- ══════════════════════════════════════════════════════════════════════════
+    do -- Webhook UI (own scope: Lua allows at most 200 local variables per function)
     local WhTab = Window:CreateTab({Name = "Webhook", Icon = "send"})
     local WH = WhTab:CreateSubTab({Name = "Main"})
 
@@ -10467,10 +11135,12 @@ do
             task.wait(5)
         end
     end)
+    end
 
     -- ══════════════════════════════════════════════════════════════════════════
     --  INFINITY CASTLE TAB (uses the SAME units / upgrades / placement settings as the Summer Event tab)
     -- ══════════════════════════════════════════════════════════════════════════
+    do -- Infinity Castle UI
     local CasTab = Window:CreateTab({Name = "Infinity Castle", Icon = "domain"})
     local CS = CasTab:CreateSubTab({Name = "Main"})
 
@@ -10478,8 +11148,7 @@ do
     gCas:CreateToggle({Name = "Auto Infinity Castle", Default = false, Flag = "AutoCastle",
         Callback = function(v)
             if v then
-                local c = Window._flags["AutoSummer"]
-                if c and c:Get() then c:Set(false, true) end
+                exclusive("AutoCastle")
                 startLoop("castle")
             elseif currentMode == "castle" then
                 stopLoop()
@@ -10500,6 +11169,12 @@ do
     gCasOpt:CreateDropdown({Name = "After A Room", Options = {"Next Room", "Return To Lobby"}, Default = "Next Room", Flag = "CastleAfter"})
     gCasOpt:CreateToggle({Name = "Teleport To Castle First (loads the floor UI)", Default = true, Flag = "CastleTeleport", HideFromActive = true})
     gCasOpt:CreateSlider({Name = "Retry Start Every", Min = 3, Max = 30, Default = 10, Suffix = "s", Flag = "CastleRetry"})
+    end
+    end) -- end of the feature function
+    if not slimeOk then
+        warn("[SlimeHub] automation failed to load: " .. tostring(slimeErr))
+        pcall(note, "Automation", "Failed to load: " .. tostring(slimeErr), "Error")
+    end
 end
 -- ── QUICK ACTION BAR ──────────────────────────────────────────────────────────
 Window:AddQuickAction({Icon="minimize",      Callback=function() Window:EnterMiniMode() end})
