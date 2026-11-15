@@ -9020,6 +9020,12 @@ do
             ground = {{-12,-8,-9},{-12,-8,-4},{-10,-8,-1},{-8,-8,-5},{-5,-8,-2},{-7,-8,2},{-4,-8,4},{-8,-8,-15},{-12,-8,-15},{2,-7,7},{1,-8,-2},{5,-8,-3},{16,-8,9},{18,-8,2},{16,-8,-1}},
             hill = {{-16,3,-2},{-17,4,-11},{-18,4,-22},{-18,6,6},{-15,6,8},{-10,5,11},{-6,5,14}},
         },
+        {
+            name = "haunted mansion",
+            sig = {"Candles", "Flowers", "Terrain", "axes", "background terrain", "bushes", "flowers", "grass decal", "lights", "logs", "pumpkins", "rocks", "shovels", "stumps", "tombstones", "trees", "Thriller_Bark_MAIN", "beams", "church", "fence"},
+            ground = {{-186.62,109.37,-602.49},{-183.6,109.37,-603.22},{-182.61,109.37,-604.88},{-186.45,109.37,-604.45},{-184.56,109.37,-605.79},{-183.21,109.37,-608.94},{-187.92,109.37,-606.48},{-186.15,109.37,-608.07},{-185.65,109.37,-610.46},{-188.28,109.37,-608.7},{-187.89,109.37,-610.3},{-187.84,109.37,-612.98},{-177.55,109.37,-609.09},{-176.68,109.37,-611.39},{-179.07,109.37,-612},{-178.42,109.37,-613.58},{-180.23,109.37,-613.41},{-179.47,109.37,-615.54},{-180.86,109.37,-615.25},{-180.24,109.37,-617.53},{-181.78,109.37,-617.22},{-181.64,109.37,-618.88},{-183.39,109.37,-618.7},{-182.62,109.37,-620.86},{-184.56,109.37,-620.32},{-183.94,109.37,-621.8},{-186.85,109.37,-621.07},{-186.4,109.37,-622.65},{-188.96,109.37,-623.48},{-188.33,109.37,-625.15},{-192.81,109.37,-624.52},{-192.31,109.37,-625.37},{-195.15,109.37,-625.09},{-193.93,109.37,-626.84},{-197.18,109.37,-625.72},{-195.62,109.37,-627.51},{-199.67,109.37,-625.9},{-198.97,109.37,-627.73},{-201.77,109.37,-627.14},{-201.03,109.37,-628.46},{-200.41,109.37,-619.64},{-199.75,109.37,-620.59},{-205.02,109.37,-621.29},{-202.78,109.37,-621.77},{-208,109.37,-622.54},{-207.21,109.37,-623.38},{-196.09,109.37,-619.12},{-195.08,109.37,-619.99},{-193.77,109.37,-618.05},{-192.76,109.37,-619.59},{-191.95,109.37,-617.03},{-190.53,109.37,-618.06}},
+            hill = {{-195.56,112.84,-605.91},{-193.34,112.84,-607.87},{-191.85,112.84,-607.94},{-190.61,112.84,-610.92},{-192.37,112.84,-612.69},{-193.56,112.84,-610.68},{-194.67,112.84,-610.74},{-194.01,112.84,-614.93},{-197.59,112.84,-612.11},{-196.43,112.84,-615.04},{-199.94,112.84,-613.73},{-199.17,112.84,-616.24},{-201.55,112.84,-613.53},{-201.62,112.84,-616.39},{-202.98,112.84,-611.18},{-204.38,112.84,-611.64},{-168.1,114.36,-619.92},{-169.3,114.28,-618.51},{-173.04,114.07,-619.32},{-172.28,114.36,-622.02},{-174.35,114.36,-622.6},{-175.79,114.03,-620.31},{-178.24,114.36,-623.62},{-175.88,114.36,-624.46},{-178.39,114.36,-626.85},{-175.96,114.36,-627.39},{-177.69,114.36,-629.95},{-175.56,114.36,-630.63},{-176.9,114.36,-632.3},{-175.07,114.36,-634.79},{-176.41,114.36,-635.65},{-175.36,114.36,-638.15},{-176.48,114.23,-638.39}},
+        },
     }
 
     -- ── LOOP CONTROL ─────────────────────────────────────────────────────────
@@ -9094,9 +9100,9 @@ do
         local names = {}
         for k in pairs(lastPresent or {}) do names[#names + 1] = k end
         table.sort(names)
-        if mapLbl then mapLbl:Set("Map: NOT RECOGNISED") end
+        if mapLbl then mapLbl:Set("Map: NOT RECOGNISED - placing near your character") end
         print("[SummerEvent] map not recognised. workspace._map contains: " .. table.concat(names, ", "))
-        note("Map", "Map not recognised (see console F9).", "Warning")
+        note("Map", "Map not recognised: units go near your character.", "Warning")
         return nil
     end
 
@@ -9112,10 +9118,49 @@ do
         return r and r.Position or p
     end
 
+    -- Only used when NO map was recognised: free spots around the character, nearest first.
+    -- Ground roles need ground (not hill) surface, Hill needs hill surface; heights come from workspace._terrain.
+    local function nearbySpots(kind)
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return {} end
+        local c = hrp.Position
+        local terrain = Workspace:FindFirstChild("_terrain")
+        local hill = terrain and terrain:FindFirstChild("hill")
+        local rp = RaycastParams.new()
+        if terrain then
+            rp.FilterType = Enum.RaycastFilterType.Include
+            rp.FilterDescendantsInstances = {terrain}
+        else
+            rp.FilterType = Enum.RaycastFilterType.Exclude
+            rp.FilterDescendantsInstances = {char}
+        end
+        local found = {}
+        local R, step = 60, 6
+        for dx = -R, R, step do
+            for dz = -R, R, step do
+                local d = math.sqrt(dx * dx + dz * dz)
+                if d >= 4 and d <= R then
+                    local r = Workspace:Raycast(Vector3.new(c.X + dx, c.Y + 40, c.Z + dz), Vector3.new(0, -120, 0), rp)
+                    if r and r.Normal.Y > 0.7 then
+                        local onHill = hill ~= nil and r.Instance:IsDescendantOf(hill)
+                        if (kind == "Hill") == onHill then
+                            found[#found + 1] = {pos = r.Position, d = d}
+                        end
+                    end
+                end
+            end
+        end
+        table.sort(found, function(a, b) return a.d < b.d end)
+        local out = {}
+        for i = 1, math.min(#found, 80) do out[i] = found[i].pos end
+        return out
+    end
+
     -- the recorded spots for a role: Farm / DPS use the ground list, Hill uses the hill list
     local function spotList(kind)
         local m = currentMap
-        if not m then return {} end
+        if not m then return nearbySpots(kind) end -- map not recognised: fall back to the area around the character
         local raw = (kind == "Hill") and m.hill or m.ground
         local list = {}
         for i = 1, #raw do
@@ -10595,36 +10640,6 @@ do
         end
     end)
 
-    -- ── MEGUMIN: use her ability from upgrade level 6 on, centred on her exact position ──
-    local lastMegumin = {}
-    task.spawn(function()
-        while true do
-            task.wait(1)
-            pcall(function()
-                if not opt("MeguminAbility", true) then return end
-                if not (running and inMatch() and isStarted() and not isFinished()) then return end
-                local r = getRemote("use_active_attack")
-                if not r then return end
-                for u in pairs((mySet())) do
-                    local st = u:FindFirstChild("_stats")
-                    local idv = st and st:FindFirstChild("id")
-                    if idv and tostring(idv.Value) == "megumin" then
-                        local stateV = st:FindFirstChild("state")
-                        local ready = (not opt("MeguminOnlyAttack", true)) or (not stateV) or tostring(stateV.Value) == "attack"
-                        if (unitLevel(u) or 0) >= opt("MeguminMinLevel", 6) and ready
-                            and tick() - (lastMegumin[u] or 0) >= opt("MeguminEvery", 5) then
-                            lastMegumin[u] = tick()
-                            local root = u:FindFirstChild("HumanoidRootPart")
-                            local p = root and root.Position or u:GetPivot().Position
-                            local point = (vector and vector.create) and vector.create(p.X, p.Y, p.Z) or Vector3.new(p.X, p.Y, p.Z)
-                            task.spawn(function() pcall(function() r:InvokeServer(u, {aoe_point = point}) end) end)
-                        end
-                    end
-                end
-            end)
-        end
-    end)
-
     -- ══════════════════════════════════════════════════════════════════════
     --  EXTRAS: background features (each one only runs while its toggle is on)
     -- ══════════════════════════════════════════════════════════════════════
@@ -10762,7 +10777,9 @@ do
     end
 
     -- daily extras
-    local CODES = {"2MILLIONFAVES", "CELESTIALCOMPASSU21    ", "SUMMERCOMEBACK", "AACOMEBACK"}
+    local CODES = {"TWOMILLION", "subtomaokuma", "CHALLENGEFIX", "GINYUFIX", "RELEASE", "SubToKelvingts", "SubToBlamspot",
+        "KingLuffy", "TOADBOIGAMING", "noclypso", "FictioNTheFirst", "GOLDENSHUTDOWN", "GOLDEN", "SINS2", "subtosnowrbx",
+        "Cxrsed", "VIGILANTE", "HAPPYEASTER", "ENTERTAINMENT"}
     local function redeemCodes()
         local r = getRemote("redeem_code")
         if not r then return note("Codes", "Redeem remote not found.", "Warning") end
@@ -10946,12 +10963,6 @@ do
     gUpOpt:CreateSlider({Name = "DPS Max Upgrades (0 = auto)", Min = 0, Max = 30, Default = 0, Flag = "DPSMaxUpgrades"})
     gUpOpt:CreateSlider({Name = "Hill Max Upgrades (0 = auto)", Min = 0, Max = 30, Default = 0, Flag = "HillMaxUpgrades"})
     gUpOpt:CreateInput({Name = "Upgrade Remote (Enter)", Default = DEFAULT_UPGRADE_REMOTE, Flag = "UpgradeRemote"})
-
-    local gAb = UP:CreateGroup({Name = "Abilities", Icon = "bolt"})
-    gAb:CreateToggle({Name = "Megumin: Use Ability", Default = true, Flag = "MeguminAbility"})
-    gAb:CreateSlider({Name = "Megumin: Min Upgrade Level", Min = 0, Max = 30, Default = 6, Flag = "MeguminMinLevel"})
-    gAb:CreateSlider({Name = "Megumin: Use At Most Every", Min = 1, Max = 60, Default = 5, Suffix = "s", Flag = "MeguminEvery"})
-    gAb:CreateToggle({Name = "Megumin: Only While Attacking", Default = true, Flag = "MeguminOnlyAttack", HideFromActive = true})
 
     -- ·· Placement ···············································································
     local PL = SumTab:CreateSubTab({Name = "Placement"})
