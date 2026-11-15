@@ -10762,9 +10762,7 @@ do
     end
 
     -- daily extras
-    local CODES = {"TWOMILLION", "subtomaokuma", "CHALLENGEFIX", "GINYUFIX", "RELEASE", "SubToKelvingts", "SubToBlamspot",
-        "KingLuffy", "TOADBOIGAMING", "noclypso", "FictioNTheFirst", "GOLDENSHUTDOWN", "GOLDEN", "SINS2", "subtosnowrbx",
-        "Cxrsed", "VIGILANTE", "HAPPYEASTER", "ENTERTAINMENT"}
+    local CODES = {"2MILLIONFAVES", "CELESTIALCOMPASSU21    ", "SUMMERCOMEBACK", "AACOMEBACK"}
     local function redeemCodes()
         local r = getRemote("redeem_code")
         if not r then return note("Codes", "Redeem remote not found.", "Warning") end
