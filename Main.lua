@@ -9116,29 +9116,19 @@ do
     local function spotList(kind)
         local m = currentMap
         if not m then return {} end
-        local isHill = (kind == "Hill")
-        local raw = isHill and m.hill or m.ground
-        local pfx = isHill and "Hill" or "Ground"
-        local from = math.max(1, opt(pfx .. "SpotFrom", 1))
-        local to = opt(pfx .. "SpotTo", 0)
-        if to <= 0 or to > #raw then to = #raw end
-        local order = opt(kind .. "SpotOrder", (kind == "Farm") and "Last to First" or "First to Last")
+        local raw = (kind == "Hill") and m.hill or m.ground
         local list = {}
-        for i = from, to do
+        for i = 1, #raw do
             local t = raw[i]
             local pos = Vector3.new(t[1], t[2], t[3])
             if m.snap then pos = snapToSurface(pos) end
             list[#list + 1] = pos
         end
-        if order == "Last to First" then
+        -- Farm takes the ground spots from the end, DPS from the start, so they do not fight over the same spots
+        if kind == "Farm" then
             local r = {}
             for i = #list, 1, -1 do r[#r + 1] = list[i] end
             list = r
-        elseif order == "Random" then
-            for i = #list, 2, -1 do
-                local j = math.random(1, i)
-                list[i], list[j] = list[j], list[i]
-            end
         end
         return list
     end
@@ -10054,30 +10044,12 @@ do
         end
     end
 
-    -- ── per-match helpers: sell at wave, leave at wave, delete map ───────────
+    -- ── per-match helpers: sell at wave, leave at wave ──────────────────────
     local function sellAllUnits()
         local r = getRemote("sell_unit_ingame")
         if not r then return end
         for u in pairs((mySet())) do
             pcall(function() r:InvokeServer(u) end)
-        end
-    end
-
-    local function deleteMapStuff()
-        local classes = {Model = true, MeshPart = true, Part = true, Folder = true, UnionOperation = true}
-        local function wipe(folder)
-            if not folder then return end
-            for _, c in ipairs(folder:GetChildren()) do
-                if classes[c.ClassName] then pcall(function() c:Destroy() end) end
-            end
-        end
-        local terrain = Workspace:FindFirstChild("_terrain")
-        if opt("DeleteMap", false) then
-            wipe(Workspace:FindFirstChild("_map"))
-            wipe(terrain and terrain:FindFirstChild("terrain"))
-        end
-        if opt("DeleteHill", false) then
-            wipe(terrain and terrain:FindFirstChild("hill"))
         end
     end
 
@@ -10202,7 +10174,6 @@ do
 
         setState("In match - recognising the map")
         resolveMap(token)
-        task.spawn(function() task.wait(2); pcall(deleteMapStuff) end) -- after the map was recognised
 
         setState("In match - waiting for start")
         local voted = false
@@ -10220,7 +10191,6 @@ do
         if not live(token) then return end
         matchStartTick = tick()
         task.spawn(waveWatcher, token)
-        task.spawn(function() task.wait(5); pcall(deleteMapStuff) end)
 
         if not isFinished() then
             placeAll(token)
@@ -10688,25 +10658,6 @@ do
         end
     end)
 
-    -- place anywhere: keeps the client's placement flag on (the server still decides)
-    local placementService
-    task.spawn(function()
-        while true do
-            if opt("PlaceAnywhere", false) then
-                pcall(function()
-                    if not placementService then
-                        local Loader = require(ReplicatedStorage.src.Loader)
-                        placementService = Loader.load_client_service(script, "PlacementServiceClient")
-                    end
-                    placementService.can_place = true
-                end)
-                task.wait()
-            else
-                task.wait(0.5)
-            end
-        end
-    end)
-
     -- auto reconnect: when the "disconnected" prompt shows up, go back to the lobby
     pcall(function()
         local overlay = game:GetService("CoreGui").RobloxPromptGui.promptOverlay
@@ -10720,22 +10671,94 @@ do
         end)
     end)
 
-    -- auto load on teleport: queue the loader for the next place
+    -- ── AUTO LOAD ON TELEPORT: run THIS script again in the next place ───────
+    -- A script cannot read its own source in an executor, so it finds the saved copy of itself:
+    --   1) already in your autoexec folder -> nothing to do (it runs by itself after every teleport)
+    --   2) a copy inside your executor's workspace folder (any name, .lua / .luau / .txt) -> queued automatically
+    local LOADER_PATH_FILE = "SlimeHub_loaderpath.txt"
+    local loaderQueued = false
+    local findSavedCopy_cache = nil
+
+    -- text that exists in this script and in no other file
+    local function looksLikeThisScript(txt)
+        return type(txt) == "string" and #txt > 20000
+            and txt:find("ExpensiveHub", 1, true) ~= nil and txt:find("SlimeHub_session_", 1, true) ~= nil
+    end
+
+    local function scriptInAutoexec()
+        if not (listfiles and readfile) then return false end
+        for _, dir in ipairs({"autoexec", "Autoexec", "AutoExec", "../autoexec", "../Autoexec", "../AutoExec"}) do
+            local ok, files = pcall(listfiles, dir)
+            if ok and type(files) == "table" then
+                for _, f in ipairs(files) do
+                    local okr, txt = pcall(readfile, f)
+                    if okr and looksLikeThisScript(txt) then return true end
+                end
+            end
+        end
+        return false
+    end
+
+    local function findSavedCopy()
+        if not (readfile and isfile) then return nil end
+        -- the path found last time
+        pcall(function()
+            if isfile(LOADER_PATH_FILE) then
+                local path = readfile(LOADER_PATH_FILE)
+                if isfile(path) and looksLikeThisScript(readfile(path)) then findSavedCopy_cache = path end
+            end
+        end)
+        if findSavedCopy_cache then return findSavedCopy_cache end
+        if not listfiles then return nil end
+        -- otherwise look through the workspace folder (3 levels deep, at most 300 files)
+        local found, scanned = nil, 0
+        local function scan(dir, depth)
+            if found or scanned > 300 then return end
+            local ok, files = pcall(listfiles, dir)
+            if not ok or type(files) ~= "table" then return end
+            for _, f in ipairs(files) do
+                if found then return end
+                local isDir = false
+                if isfolder then pcall(function() isDir = isfolder(f) end) end
+                if isDir then
+                    if depth < 3 then scan(f, depth + 1) end
+                else
+                    local ext = tostring(f):lower():match("%.(%w+)$")
+                    if ext == "lua" or ext == "luau" or ext == "txt" then
+                        scanned = scanned + 1
+                        local okr, txt = pcall(readfile, f)
+                        if okr and looksLikeThisScript(txt) then found = f end
+                    end
+                end
+            end
+        end
+        scan("", 0)
+        if found and writefile then pcall(writefile, LOADER_PATH_FILE, found) end
+        return found
+    end
+
     local function queueLoader()
-        if not opt("AutoLoadOnTeleport", false) then return end
-        local src = tostring(opt("LoaderSource", "") or "")
-        if src == "" then
-            note("Auto Load", "Enter your script URL or file name first.", "Warning")
+        if not opt("AutoLoadOnTeleport", false) or loaderQueued then return end
+        local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+        if not q then
+            note("Auto Load", "Your executor has no queue_on_teleport. Put the script in its autoexec folder instead.", "Warning")
             return
         end
-        local code
-        if src:match("^https?://") then
-            code = ("loadstring(game:HttpGet(%q))()"):format(src)
-        else
-            code = ("loadstring(readfile(%q))()"):format(src)
+        if scriptInAutoexec() then
+            loaderQueued = true
+            note("Auto Load", "The script is in your autoexec folder: it already runs after every teleport.", "Info")
+            return
         end
-        local q = queue_on_teleport or (syn and syn.queue_on_teleport)
-        if q then pcall(q, code) else note("Auto Load", "Your executor has no queue_on_teleport.", "Warning") end
+        findSavedCopy_cache = nil
+        local path = findSavedCopy()
+        if not path then
+            note("Auto Load", "No saved copy of the script found. Save it once as a .lua file in your executor's workspace folder (any name) or put it in autoexec.", "Warning")
+            return
+        end
+        if pcall(q, ("loadstring(readfile(%q))()"):format(path)) then
+            loaderQueued = true
+            note("Auto Load", "Queued for the next teleport: " .. path, "Success")
+        end
     end
 
     -- daily extras
@@ -10770,24 +10793,6 @@ do
             end
         end
     end)
-    task.spawn(function()
-        local eggs = {"easter_egg_1", "easter_egg_2", "easter_egg_3", "easter_egg_4", "easter_egg_5", "easter_egg_6"}
-        while true do
-            task.wait(1)
-            local area = Workspace:FindFirstChild("EasterArea")
-            if area and area:FindFirstChild("leaderboard") then
-                if opt("AutoFeedEgg", false) then
-                    local r = getRemote("feed_easter_meter")
-                    if r then for _, e in ipairs(eggs) do pcall(function() r:InvokeServer(e) end) end end
-                end
-                if opt("AutoClaimEgg", false) then
-                    local r = getRemote("claim_easter_meter")
-                    if r then for _, e in ipairs(eggs) do pcall(function() r:InvokeServer(e) end) end end
-                end
-            end
-        end
-    end)
-
     -- auto summon
     local BANNERS = {Special = "EventClover", Standard = "Standard"}
     task.spawn(function()
@@ -10966,16 +10971,6 @@ do
     gMeth:CreateToggle({Name = "Click: Skip Spots Blocked From View", Default = true, Flag = "ViewCheck", HideFromActive = true})
     gMeth:CreateInput({Name = "Click: Cancel Key (Enter)", Default = "Q", Placeholder = "key to cancel placing", Flag = "CancelKey"})
 
-    local gSp = PL:CreateGroup({Name = "Which Recorded Spots To Use", Icon = "place"})
-    gSp:CreateLabel({Text = "Farm and DPS share the ground spots, Hill uses the hill spots. Spots are numbered in the order they were recorded."})
-    gSp:CreateSlider({Name = "Ground Spots: From #", Min = 1, Max = 150, Default = 1, Flag = "GroundSpotFrom"})
-    gSp:CreateSlider({Name = "Ground Spots: To # (0 = all)", Min = 0, Max = 150, Default = 0, Flag = "GroundSpotTo"})
-    gSp:CreateSlider({Name = "Hill Spots: From #", Min = 1, Max = 150, Default = 1, Flag = "HillSpotFrom"})
-    gSp:CreateSlider({Name = "Hill Spots: To # (0 = all)", Min = 0, Max = 150, Default = 0, Flag = "HillSpotTo"})
-    gSp:CreateDropdown({Name = "DPS Spot Order", Options = {"First to Last", "Last to First", "Random"}, Default = "First to Last", Flag = "DPSSpotOrder"})
-    gSp:CreateDropdown({Name = "Farm Spot Order", Options = {"First to Last", "Last to First", "Random"}, Default = "Last to First", Flag = "FarmSpotOrder"})
-    gSp:CreateDropdown({Name = "Hill Spot Order", Options = {"First to Last", "Last to First", "Random"}, Default = "First to Last", Flag = "HillSpotOrder"})
-
     local gTry = PL:CreateGroup({Name = "Retries / Timeouts", Icon = "timer"})
     gTry:CreateSlider({Name = "Tries Per Spot", Min = 1, Max = 10, Default = 2, Flag = "RetriesPerSpot"})
     gTry:CreateSlider({Name = "Delay Between Tries", Min = 0.1, Max = 3, Increment = 0.1, Default = 0.4, Suffix = "s", Flag = "PlaceDelay"})
@@ -11029,28 +11024,6 @@ do
     gChal:CreateDropdown({Name = "Wanted Reward", Options = {"star_fruit_random", "star_remnant", "gems", "gold"}, Default = "star_fruit_random", Flag = "ChallengeReward"})
     gChal:CreateToggle({Name = "Farm Any Reward", Default = false, Flag = "AutoChallengeAny", HideFromActive = true})
 
-    local TM = FarmTab:CreateSubTab({Name = "Team"})
-    local gTeam = TM:CreateGroup({Name = "Team", Icon = "groups"})
-    local teamLbl = gTeam:CreateLabel({Text = "Equipped: (press Read Team)"})
-    local function readTeam()
-        local eq = readEquipped()
-        local parts = {}
-        for slot = 1, 6 do
-            if eq[slot] then parts[#parts + 1] = slot .. ": " .. eq[slot].id end
-        end
-        teamLbl:Set(#parts > 0 and ("Equipped - " .. table.concat(parts, " | ")) or "Could not read the equipped team")
-        autoFillIds(true) -- saves the uuids into the Unit ID boxes
-    end
-    gTeam:CreateButton({Name = "Read + Save Equipped Team", Icon = "search", Callback = readTeam})
-    gTeam:CreateDropdown({Name = "Team Preset", Options = {"TEAM 1", "TEAM 2", "TEAM 3", "TEAM 4", "TEAM 5"}, Default = "TEAM 1", Flag = "TeamPreset"})
-    gTeam:CreateButton({Name = "Switch To Preset", Icon = "swap_horiz", Callback = function()
-        local r = getRemote("switch_team_loadout")
-        if not r then return note("Team", "Team remote not found.", "Warning") end
-        local n = tostring(opt("TeamPreset", "TEAM 1")):match("%d")
-        pcall(function() r:InvokeServer(n) end)
-        task.delay(2, readTeam)
-        note("Team", "Switched to team " .. tostring(n), "Success")
-    end})
     end
 
     -- ══════════════════════════════════════════════════════════════════════════
@@ -11066,8 +11039,6 @@ do
     gDaily:CreateToggle({Name = "Claim Daily Reward On Start", Default = true, Flag = "AutoClaimDaily", HideFromActive = true})
     gDaily:CreateToggle({Name = "Auto Daily Quest", Default = false, Flag = "AutoDailyQuest", HideFromActive = true})
     gDaily:CreateInput({Name = "Daily Quest Id (Enter)", Default = "mha_daily", Flag = "DailyQuestId"})
-    gDaily:CreateToggle({Name = "Auto Feed Easter Eggs", Default = false, Flag = "AutoFeedEgg", HideFromActive = true})
-    gDaily:CreateToggle({Name = "Auto Claim Easter Eggs", Default = false, Flag = "AutoClaimEgg", HideFromActive = true})
 
     local SH = ExTab:CreateSubTab({Name = "Shop"})
     local gSum = SH:CreateGroup({Name = "Auto Summon", Icon = "casino"})
@@ -11081,11 +11052,6 @@ do
     gMer:CreateToggle({Name = "Auto Snipe Merchant", Default = false, Flag = "AutoSnipeMerchant"})
 
     local MS = ExTab:CreateSubTab({Name = "Misc"})
-    local gPerf = MS:CreateGroup({Name = "Performance / Placement", Icon = "speed"})
-    gPerf:CreateLabel({Text = "Delete Map and Delete Hill remove the decorations on the client (hills included, so Hill spots stop being visible: use the Remote placing method with them)."})
-    gPerf:CreateToggle({Name = "Delete Map (FPS)", Default = false, Flag = "DeleteMap"})
-    gPerf:CreateToggle({Name = "Delete Hills", Default = false, Flag = "DeleteHill"})
-    gPerf:CreateToggle({Name = "Place Anywhere", Default = false, Flag = "PlaceAnywhere"})
     local gPlr = MS:CreateGroup({Name = "Player", Icon = "person"})
     gPlr:CreateToggle({Name = "Hide My Name Tag", Default = false, Flag = "HideName"})
     gPlr:CreateToggle({Name = "Mute Error Sounds And Messages", Default = true, Flag = "MuteErrors", HideFromActive = true})
@@ -11093,9 +11059,7 @@ do
     gConn:CreateToggle({Name = "Auto Reconnect After A Kick", Default = true, Flag = "AutoReconnect", HideFromActive = true})
     gConn:CreateToggle({Name = "Auto Load On Teleport", Default = false, Flag = "AutoLoadOnTeleport", HideFromActive = true,
         Callback = function(v) if v then queueLoader() end end})
-    gConn:CreateInput({Name = "Script URL Or File Name (Enter)", Placeholder = "https://... or myscript.lua", Flag = "LoaderSource",
-        Callback = function() queueLoader() end})
-    gConn:CreateLabel({Text = "Only needed if you do NOT use your executor's autoexec folder (using both loads the script twice)."})
+    gConn:CreateLabel({Text = "Finds the saved copy of this script by itself (autoexec or your workspace folder) and re-runs it after every teleport. Not needed if the script is already in autoexec."})
     end
 
     -- ══════════════════════════════════════════════════════════════════════════
