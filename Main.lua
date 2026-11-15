@@ -12039,6 +12039,69 @@ Nly5NH2//9k=
     end
 
     -- ══════════════════════════════════════════════════════════════════════════
+    --  DRAG GLASS: while you drag the title bar, a grey see-through layer covers the whole window
+    --  (so none of the features are readable), and it disappears the instant you let go
+    -- ══════════════════════════════════════════════════════════════════════════
+    local UserInputService = game:GetService("UserInputService")
+    local glass = {active = false, overlay = nil, hooked = nil}
+
+    local function isPress(input)
+        return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+    end
+
+    local function glassOff()
+        if not glass.active then return end
+        glass.active = false
+        if glass.overlay and glass.overlay.Parent then glass.overlay.Visible = false end
+    end
+
+    local function glassOn(byTouch)
+        if glass.active or not opt("DragGlass", true) then return end
+        local main = findMenu()
+        if not main then return end
+        glass.active = true
+        if not (glass.overlay and glass.overlay.Parent == main) then
+            local ov = Instance.new("Frame")
+            ov.Name = "DragGlassOverlay"
+            ov.Size = UDim2.new(1, 0, 1, 0)
+            ov.Position = UDim2.new(0, 0, 0, 0)
+            ov.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+            ov.BorderSizePixel = 0
+            ov.Active = false
+            ov.ZIndex = 9999 -- on top of everything in the window
+            ov.Parent = main
+            glass.overlay = ov
+        end
+        glass.overlay.BackgroundTransparency = 1 - opt("DragGlassStrength", 50) / 100
+        glass.overlay.Visible = true
+        -- safety net: if the release event is ever missed, the layer must not stay on the window
+        task.spawn(function()
+            local t0 = tick()
+            while glass.active do
+                task.wait(0.25)
+                local held = false
+                pcall(function() held = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end)
+                if (not byTouch and not held) or tick() - t0 > 20 then glassOff() end
+            end
+        end)
+    end
+
+    pcall(function()
+        local main = findMenu()
+        local topbar = main and main:FindFirstChild("Topbar")
+        if topbar and glass.hooked ~= topbar then
+            glass.hooked = topbar
+            -- the library starts its window drag on this same event, so the layer shows exactly while dragging
+            topbar.InputBegan:Connect(function(input)
+                if isPress(input) then glassOn(input.UserInputType == Enum.UserInputType.Touch) end
+            end)
+        end
+        UserInputService.InputEnded:Connect(function(input)
+            if isPress(input) then glassOff() end
+        end)
+    end)
+
+    -- ══════════════════════════════════════════════════════════════════════════
     --  UI
     -- ══════════════════════════════════════════════════════════════════════════
     do -- Summer Event UI (own scope: Lua allows at most 200 local variables per function)
@@ -12309,6 +12372,11 @@ Nly5NH2//9k=
             queueWallpaper()
         end})
     gOwn:CreateLabel({Text = "PNG or JPG. A link is downloaded once and saved in the workspace folder SlimeHub/wallpapers."})
+
+    local gDrag = WP:CreateGroup({Name = "Window Dragging", Icon = "open_with"})
+    gDrag:CreateToggle({Name = "Glass While Dragging", Default = true, Flag = "DragGlass", HideFromActive = true})
+    gDrag:CreateSlider({Name = "Glass Strength", Min = 10, Max = 100, Default = 50, Suffix = "%", Flag = "DragGlassStrength"})
+    gDrag:CreateLabel({Text = "Dragging the title bar covers the menu with a grey glass layer. It disappears the moment you let go."})
     end
 
     do -- Infinity Castle UI
